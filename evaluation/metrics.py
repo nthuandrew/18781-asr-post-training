@@ -3,37 +3,79 @@
 from __future__ import annotations
 
 import re
-from typing import Dict, Iterable, List
+from typing import Dict, List
+
+try:
+    from jiwer import wer as jiwer_wer
+except ImportError:  # pragma: no cover - jiwer is optional for lightweight environments.
+    jiwer_wer = None
+
+
+def _normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+def _levenshtein_distance(reference: str, hypothesis: str) -> int:
+    ref_tokens = reference.split()
+    hyp_tokens = hypothesis.split()
+    if ref_tokens == hyp_tokens:
+        return 0
+
+    rows = len(ref_tokens) + 1
+    cols = len(hyp_tokens) + 1
+    dp = [[0 for _ in range(cols)] for _ in range(rows)]
+
+    for i in range(rows):
+        dp[i][0] = i
+    for j in range(cols):
+        dp[0][j] = j
+
+    for i in range(1, rows):
+        for j in range(1, cols):
+            cost = 0 if ref_tokens[i - 1] == hyp_tokens[j - 1] else 1
+            dp[i][j] = min(
+                dp[i - 1][j] + 1,
+                dp[i][j - 1] + 1,
+                dp[i - 1][j - 1] + cost,
+            )
+
+    return dp[-1][-1]
 
 
 def wer_score(reference: str, prediction: str) -> float:
-    """A lightweight placeholder WER estimate.
-
-    Replace with jiwer.wer for production use.
-    """
-    ref_tokens = reference.split()
-    pred_tokens = prediction.split()
-    if not ref_tokens:
+    """Compute WER using jiwer when available, otherwise fall back to token-level Levenshtein."""
+    reference_norm = _normalize_text(reference)
+    prediction_norm = _normalize_text(prediction)
+    if not reference_norm:
         return 0.0
-    errors = sum(1 for token in ref_tokens if token not in pred_tokens)
-    return errors / len(ref_tokens)
+    if jiwer_wer is not None:
+        return float(jiwer_wer(reference_norm, prediction_norm))
+
+    distance = _levenshtein_distance(reference_norm, prediction_norm)
+    ref_length = max(len(reference_norm.split()), 1)
+    return distance / ref_length
 
 
 def format_compliance(text: str) -> float:
-    """A simple formatting heuristic for number and disfluency compliance."""
-    score = 0.0
-    if re.search(r"\b(?:um|uh|erm|mm)\b", text.lower()):
+    """Heuristic score for formatting quality: clean text with numbers is rewarded, disfluencies are rejected."""
+    normalized = _normalize_text(text).lower()
+    if not normalized:
         return 0.0
-    score += 0.5
-    if re.search(r"\b\d+(?:\.\d+)?\b", text):
+
+    disfluency_tokens = {"um", "uh", "erm", "mm", "like", "you know"}
+    if any(token in normalized.split() for token in disfluency_tokens):
+        return 0.0
+
+    score = 0.5
+    if re.search(r"\b\d+(?:\.\d+)?\b", normalized):
         score += 0.5
     return score
 
 
 def harmful_edit_rate(reference: str, prediction: str) -> float:
-    """Estimate semantic drift risk for transcript editing."""
-    ref_tokens = set(reference.lower().split())
-    pred_tokens = set(prediction.lower().split())
+    """Estimate how much the generated caption diverges semantically from the original transcript."""
+    ref_tokens = set(_normalize_text(reference).lower().split())
+    pred_tokens = set(_normalize_text(prediction).lower().split())
     if not ref_tokens:
         return 0.0
     overlap = len(ref_tokens & pred_tokens)
@@ -41,17 +83,14 @@ def harmful_edit_rate(reference: str, prediction: str) -> float:
 
 
 def reward_hacking_tracker(format_score: float, wer: float, threshold: float = 0.15) -> bool:
-    """Return True when format quality improves while WER is unacceptably worse."""
+    """Return True when format quality improves while WER degrades beyond a tolerable threshold."""
     return format_score > 0.8 and wer > threshold
 
 
 def compute_metrics(reference: str, prediction: str) -> Dict[str, float]:
     """Compute a minimal set of evaluation metrics."""
-    score = wer_score(reference, prediction)
-    fmt_score = format_compliance(prediction)
-    harmful = harmful_edit_rate(reference, prediction)
     return {
-        "wer": score,
-        "format_compliance": fmt_score,
-        "harmful_edit_rate": harmful,
+        "wer": wer_score(reference, prediction),
+        "format_compliance": format_compliance(prediction),
+        "harmful_edit_rate": harmful_edit_rate(reference, prediction),
     }

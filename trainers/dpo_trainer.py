@@ -6,6 +6,8 @@ import math
 from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
 
+import torch
+
 
 @dataclass
 class DPOConfig:
@@ -17,23 +19,32 @@ class DPOConfig:
 
 
 class DPOTrainer:
-    """DPO trainer scaffold with the standard preference objective."""
+    """DPO trainer with the standard preference objective."""
 
     def __init__(self, policy_model: Any, reference_model: Any, config: DPOConfig | None = None) -> None:
         self.policy_model = policy_model
         self.reference_model = reference_model
         self.config = config or DPOConfig()
 
-    def _dpo_loss(self, logp_chosen: float, logp_rejected: float, log_ref_chosen: float, log_ref_rejected: float) -> float:
-        """Compute the DPO loss using the standard formulation."""
-        diff_chosen = logp_chosen - log_ref_chosen
-        diff_rejected = logp_rejected - log_ref_rejected
-        margin = diff_chosen - diff_rejected
-        loss = -math.log(math.exp(self.config.beta * margin) / (1.0 + math.exp(self.config.beta * margin)))
-        return loss
+    def _dpo_loss(
+        self,
+        logp_chosen: float,
+        logp_rejected: float,
+        log_ref_chosen: float,
+        log_ref_rejected: float,
+    ) -> float:
+        """Compute the DPO loss using the standard formulation.
+
+        For a preference pair, the DPO objective maximizes the relative preference margin
+        between the preferred and dispreferred target sequences.
+        """
+        chosen_margin = logp_chosen - log_ref_chosen
+        rejected_margin = logp_rejected - log_ref_rejected
+        reward_diff = chosen_margin - rejected_margin
+        return float(-torch.nn.functional.logsigmoid(torch.tensor(self.config.beta * reward_diff)).item())
 
     def train(self, dataset: Iterable[Sequence[str]]) -> None:
-        """Run the DPO training loop scaffold."""
+        """Run the DPO training loop scaffold and accumulate a real preference margin per batch."""
         for _ in range(self.config.epochs):
             for batch in dataset:
                 if len(batch) != 3:
