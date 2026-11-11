@@ -1,0 +1,19 @@
+venv/
+env/
+.env
+
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*.class
+
+# to avoid large files being tracked
+data/
+checkpoints/
+*.pt
+*.pth
+*.safetensors
+
+# IDE
+.vscode/
+.idea/
