@@ -1,0 +1,19 @@
+model:
+  policy_model: "whisper-small"
+  reference_model: "whisper-small"
+  cache_dir: "./cache"
+
+training:
+  output_dir: "./outputs/dpo"
+  learning_rate: 5.0e-6
+  batch_size: 4
+  gradient_accumulation_steps: 1
+  epochs: 2
+  beta: 0.1
+  max_length: 512
+  max_prompt_length: 256
+
+logging:
+  log_every_steps: 20
+  save_every_steps: 200
+  use_wandb: false
