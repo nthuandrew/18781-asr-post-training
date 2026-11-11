@@ -8,6 +8,20 @@ The core objective is to improve transcript style alignment without harming reco
 
 This project is designed around a modular architecture that can support both a production-oriented Hugging Face workflow and a custom ESPnet / OWSM-style training loop for sequence log-probability extraction.
 
+### Pilot experimental track (agreed scope)
+
+To keep the study scientifically comparable and feasible, the first experimental track is narrowed to:
+
+* Base model: OWSM v4
+* Dataset: FLEURS only, with English subset(s) first
+* Objective: improve output format compliance (casing, punctuation, numbers, disfluency handling)
+* Constraint: WER must not degrade relative to the base model, or must stay within a predefined tolerance window
+* Reward design: format score as the main optimization signal, with WER acting as a hard constraint or penalty
+
+This follows the TA suggestion that RL in ASR is only meaningful when the task is defined as formatting alignment rather than raw speech recognition score maximization. In other words, the training signal should target output format compliance rather than unconstrained transcript rewriting, while acoustic correctness remains enforced by WER.
+
+A second track may later use rare-word or named-entity accuracy as a reward, but the core pilot remains OWSM v4 on FLEURS with WER-as-constraint.
+
 ---
 
 ## 2. Framework Survey & Architectural Decisions
