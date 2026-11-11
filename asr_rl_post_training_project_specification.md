@@ -1,152 +1,333 @@
 # Project Specification: Reinforcement Learning Post-Training for Style Alignment in ASR
 
-## 1. Project Overview
+## 1. Project Overview & Core Mission
 
-This project aims to apply Reinforcement Learning (RL) post-training methods (e.g., DPO, GRPO) to Automatic Speech Recognition (ASR) models. The goal is to align ASR outputs with user-preferred formatting (disfluency removal, number formatting) while strictly preserving acoustic fidelity (Word Error Rate, WER).
+This project investigates how reinforcement learning (RL) post-training methods (e.g., DPO, GRPO) align Automatic Speech Recognition (ASR) models with user-preferred transcription formatting (disfluency removal, number/entity formatting, casing, punctuation) while strictly enforcing an acoustic fidelity constraint: WER must not degrade beyond acceptable thresholds.
+
+The core objective is to improve transcript style alignment without harming recognition quality. In practice, this means removing filler words such as "um" and "uh", normalizing numerical expressions, and preserving semantic meaning and acoustic fidelity under a strict Word Error Rate constraint.
+
+This project is designed around a modular architecture that can support both a production-oriented Hugging Face workflow and a custom ESPnet / OWSM-style training loop for sequence log-probability extraction.
+
+---
 
 ## 2. Framework Survey & Architectural Decisions
 
-To bootstrap this project efficiently, the coding agent must understand the underlying framework ecosystem:
+To bootstrap the project efficiently, the implementation should understand the underlying framework ecosystem.
 
-### Option A: Hugging Face Ecosystem (Transformers + TRL) - **\[Highly Recommended for Prototyping\]**
+### Option A: Hugging Face Ecosystem (Transformers + TRL) — Recommended for Prototyping
 
-* **Pros**: Hugging Face's `trl` (Transformer Reinforcement Learning) library natively supports `DPOTrainer` for Sequence-to-Sequence models (like Whisper). It handles reference model freezing, KL divergence penalties, and log-prob calculations out of the box.
-* **Cons**: Limited to models available in HF (e.g., Whisper, SeamlessM4T). If you strictly need OWSM v4, it might require conversion.
-* **Verdict**: Best for rapid implementation. The agent can directly map audio + chosen/rejected text into a Hugging Face `Dataset` and use `DPOTrainer`.
+* Pros:
+  * Hugging Face `trl` natively supports `DPOTrainer` for sequence-to-sequence ASR models such as Whisper.
+  * It handles reference model freezing, KL penalties, and log-prob extraction in a familiar training flow.
+  * It is the fastest path to a working RL preference pipeline.
+* Cons:
+  * It is limited to models available via Hugging Face.
+  * If the project requires OWSM v4 specifically, the model may need an import or conversion step.
+* Verdict:
+  * Best for rapid implementation, dataset-to-training loops, and experimentation.
+  * The project can map `(audio, chosen, rejected)` triplets into a Hugging Face `Dataset` and use `DPOTrainer` directly.
 
 ### Option B: ESPnet (for OWSM v4) + Custom RL Loop
 
-* **Pros**: Native support for OWSM v4. Excellent data preparation scripts (Kaldi-style) for ASR datasets.
-* **Cons**: ESPnet is designed for SFT/CTC/RNN-T. It does not have built-in DPO or GRPO trainers.
-* **Verdict**: If ESPnet/OWSM v4 is mandatory, the agent must implement a custom PyTorch training loop. The loop needs to forward the audio through the ESPnet encoder, pass the `chosen` and `rejected` sequences to the decoder, extract the log probabilities, and compute the DPO loss manually:
-  `L_DPO = -log(sigmoid(beta * ((log_p_chosen - log_ref_chosen) - (log_p_rejected - log_ref_rejected))))`
+* Pros:
+  * Native support for OWSM v4 and ESPnet-style encoder-decoder pipelines.
+  * Strong support for speech data preparation and Kaldi-style tooling.
+* Cons:
+  * ESPnet is not designed around built-in DPO or GRPO trainers.
+  * A custom PyTorch loop is required to compute the target-sequence log probabilities and the preference objective.
+* Verdict:
+  * If ESPnet / OWSM v4 is mandatory, the implementation must manually forward audio through the encoder, tokenize target text, pass encoder memory and target tokens to the decoder, and then compute log probabilities over the target sequence.
+  * The DPO objective should follow the standard form:
 
-**Decision for Agent:** The codebase should be modularized so the `ModelInterface` can support either Hugging Face or a wrapped ESPnet model. We will assume a custom training loop structure to ensure compatibility with both.
+    `L_DPO = -log(sigmoid(beta * ((log_p_chosen - log_ref_chosen) - (log_p_rejected - log_ref_rejected))))`
 
-## 3. Repository Structure
+**Decision for Agent:** The project should expose a common `ASRModelInterface` that supports both Hugging Face and ESPnet-backed models. This keeps the training and evaluation logic modular while allowing either backend to be swapped in.
 
-The agent should create the following directory structure:
+---
 
-```
-asr_rl_alignment/
+## 3. Base Model Specification: OWSM v4 vs. OpusLM
+
+The implementation must abstract model interfaces to support at least two speech-model paradigms.
+
+### 3.1 OWSM v4 (Open Whisper-Style Speech Model v4)
+
+* Architecture: continuous feature sequence-to-sequence encoder-decoder Transformer.
+* Audio input: log-mel spectrogram features.
+* Mechanism: standard encoder-decoder cross-attention with sequence log-probability extraction.
+* Role: primary baseline for conventional continuous-feature ASR models.
+* Objective: compute $P(y \mid x_{audio})$ by feeding encoder memory and target token sequence into the decoder and collecting logits over the target tokens.
+
+### 3.2 OpusLM (Speech Language Model)
+
+* Architecture: decoder-only Transformer initialized from text LLMs such as SmolLM2.
+* Audio input: quantized discrete audio tokens extracted via EnCodec, SoundStream, HuBERT, or a comparable tokenizer.
+* Mechanism: unified next-token prediction across audio and text token streams.
+* Role: benchmark for pure autoregressive speech-language modeling.
+* Objective: compute $P(y_{text} \mid y_{audio\_tokens})$ using standard causal LM heads.
+
+The common logic across both backends is the same: the model must support `generate(audio, **kwargs) -> str` and `forward_log_probs(audio, text) -> torch.Tensor`.
+
+---
+
+## 4. Repository Structure
+
+The project follows a modular organization that separates data preparation, model abstraction, training, and evaluation.
+
+```text
+18813-asr-post-training/
 ├── configs/
-│   ├── dpo_config.yaml       # Hyperparameters (beta, LR, batch size)
+│   ├── dpo_config.yaml
 │   ├── grpo_config.yaml
+│   ├── owsm_v4_dpo.yaml
+│   ├── opuslm_grpo.yaml
 │   └── sft_config.yaml
 ├── data_prep/
-│   ├── download_datasets.sh     # Bash script to download open-source datasets
-│   ├── build_preference_data.py # Scripts to generate (chosen, rejected) pairs
-│   ├── loader_disfluency.py     # Parses Disfluency Speech & Switchboard
-│   └── loader_numb3rs.py        # Parses NVIDIA Numb3rs
+│   ├── build_preference_data.py
+│   ├── download_datasets.sh
+│   ├── download_open_datasets.py
+│   ├── generate_preference_pairs.py
+│   ├── load_local_datasets.py
+│   ├── loader_disfluency.py
+│   └── loader_numb3rs.py
 ├── models/
-│   ├── espnet_wrapper.py        # Wrapper for OWSM v4 (ESPnet) log-prob extraction
-│   └── hf_wrapper.py            # Wrapper for HF Seq2Seq models
+│   ├── base.py
+│   ├── base_interface.py
+│   ├── espnet_wrapper.py
+│   ├── hf_wrapper.py
+│   ├── owsm_wrapper.py
+│   └── opuslm_wrapper.py
 ├── trainers/
-│   ├── sft_trainer.py           # Baseline supervised fine-tuning
-│   ├── dpo_trainer.py           # DPO custom loss implementation
-│   └── grpo_trainer.py          # GRPO / Policy Gradient implementation
+│   ├── dpo_trainer.py
+│   ├── grpo_trainer.py
+│   ├── sft_trainer.py
+│   └── __init__.py
 ├── evaluation/
-│   ├── metrics.py               # WER (jiwer), Format Compliance (regex/LLM judge)
-│   └── eval_pipeline.py         # Runs evaluation on FLEURS, LibriSpeech, etc.
-├── main.py                      # CLI entry point
-└── requirements.txt
+│   ├── eval_pipeline.py
+│   ├── metrics.py
+│   ├── reward_hacking.py
+│   └── __init__.py
+├── main.py
+├── README.md
+├── requirements.txt
+├── asr_rl_post_training_project_specification.md
+└── details.md
 ```
 
-## 4. Data Pipeline Specifications
+The current project already includes a subset of this structure, including `models/base.py`, `models/hf_wrapper.py`, `models/espnet_wrapper.py`, and `trainers/*.py`, while the longer specification adds the more complete research-oriented file map.
 
-### 4.1 Dataset Acquisition and Downloading
+---
 
-The agent should implement a reliable downloading pipeline. The datasets fall into two categories: Open Source (available via Hugging Face/OpenSLR) and LDC Restricted. 
+## 5. Data Pipeline Specifications
 
-**A. Open-Source Datasets (Implement auto-download via `datasets` or `wget`)**
-*   **LibriSpeech (~1,000 h):**
-    *   *Method:* Hugging Face `datasets` library.
-    *   *Code:* `load_dataset("librispeech_asr", "all")`
-*   **FLEURS (~12h per language):**
-    *   *Method:* Hugging Face `datasets` library.
-    *   *Code:* `load_dataset("google/fleurs", "en_us")` (specify target languages).
-*   **TED-LIUM Release 3 (~452h):**
-    *   *Method:* Hugging Face `datasets` library or OpenSLR.
-    *   *Code:* `load_dataset("LIUM/tedlium", "release3")`
-*   **NVIDIA Numb3rs (4.89 h):**
-    *   *Method:* Can be found on Hugging Face (e.g., `nvidia/numb3rs` or user-uploaded mirrors) or via NeMo open-source data scripts. The agent should use `datasets.load_dataset` if available, or write a routine to fetch the NeMo JSON manifest and audio tarballs.
+The data pipeline is split into target-task post-training datasets and evaluation datasets.
 
-**B. Restricted Datasets (Require LDC License / Manual Download)**
-*   **Switchboard (~260 h) & TIMIT (~5h):**
-    *   *Method:* These are Linguistic Data Consortium (LDC) datasets. The agent **cannot** download them automatically without credentials. 
-    *   *Agent Instruction:* The agent must implement a data loader that assumes the user has downloaded the datasets manually to a specific local path (e.g., `./data/switchboard/`, `./data/timit/`). Use standard Kaldi-style data parsing or `torchaudio.datasets` (for TIMIT) pointed to the local root.
-*   **Disfluency Speech (~10h):**
-    *   *Method:* Depending on the specific dataset version (e.g., from LDC or a specific Github repo), the agent should assume a local directory structure. If it refers to an open-source variant (like Fisher disfluency subsets available online), the agent should provide a script to parse the parallel transcript variants (fluent vs. disfluent).
+### 5.1 Datasets Overview & Recommendations
 
-### 4.2 Input Data Format
+| Dataset | Type / Size | Primary Purpose | Acquisition / Download Method |
+| :--- | :--- | :--- | :--- |
+| NVIDIA `preference-asr-bench` | Synthetic & real preference pairs | Ground-truth preference instructions and format evaluation | Hugging Face: `load_dataset("nvidia/preference-asr-bench")` |
+| NVIDIA Numb3rs | ~4.89 h | Number, date, currency, and measurement formatting | Hugging Face or NeMo JSON manifest scripts |
+| Switchboard & Disfluency Speech | ~260 h / ~10 h | Spontaneous speech, disfluency removal, and self-correction resolution | Local download with LDC credentials or local Fisher-like disfluency subsets |
+| FLEURS (en_us & subsets) | ~12 h / language | Benchmark for format compliance under strict WER bounds | Hugging Face: `load_dataset("google/fleurs", "en_us")` |
+| TED-LIUM Release 3 | ~452 h | Public speaking benchmark for ASR accuracy and formatting transfer | Hugging Face or OpenSLR |
+| LibriSpeech (train-clean-100) | ~100 h | Compute regularizer and holdout set for ASR sanity checks | Hugging Face: `load_dataset("librispeech_asr", "clean")` |
 
-For SFT, the agent needs `(audio_path, target_text)`.
-For DPO, the dataset must be transformed into preference pairs:
-`{ "audio_path": str, "chosen": str, "rejected": str }`
+### 5.2 Dataset Acquisition Strategy
 
-* **Chosen**: The correctly formatted transcript (e.g., disfluency removed, numbers formatted as "100").
-* **Rejected**: The raw verbatim transcript (e.g., with "um", "uh", or "one hundred").
+The implementation should support both open-source datasets and local restricted datasets.
 
-### 4.3 Preference Pair Generation (`data_prep/build_preference_data.py`)
+**A. Open-source datasets**
 
-The agent must implement a function that takes the base model, decodes the training audio to generate N hypotheses, and scores them using a rule-based or LLM Judge:
+* LibriSpeech
+  * `load_dataset("librispeech_asr", "all")` or a cleaned subset such as `clean`.
+* FLEURS
+  * `load_dataset("google/fleurs", "en_us")` with target language selection.
+* TED-LIUM Release 3
+  * `load_dataset("LIUM/tedlium", "release3")` if available via Hugging Face, or use OpenSLR download tools.
+* NVIDIA Numb3rs
+  * Use Hugging Face if available; otherwise fall back to NeMo-style JSON manifests and tarball extraction.
 
-* `Format_Score`: +1 for correct number format, +1 for no disfluency.
-* `WER_Constraint`: Reject any hypothesis where WER against the literal transcript is > threshold (to prevent hallucination).
-* **Pairing**: Rank hypotheses. Highest score = `chosen`, Lowest score = `rejected`.
+**B. Restricted datasets (manual / LDC)**
 
-## 5. Model Interface (`models/`)
+* Switchboard and TIMIT require local access and credentials.
+* The data loader should assume the datasets are already available under local directories such as `./data/switchboard/` and `./data/timit/`.
+* Implementation can use Kaldi-style parsing or `torchaudio.datasets` if the dataset format supports it.
+* Disfluency speech can be handled with a local directory structure or parallel fluent/disfluent transcript variants.
 
-The agent must define a base class `ASRModelInterface` with the following methods:
+### 5.3 Input Data Format
 
-1. `forward_log_probs(audio, text) -> torch.Tensor`: Returns sequence log probabilities for the given text.
-2. `generate(audio, **kwargs) -> str`: Returns decoded text.
+For SFT, the model needs `(audio_path, target_text)` samples.
 
-If using **ESPnet (OWSM v4)**:
-* Extract the `encoder` and `decoder`.
-* Pass audio to `encoder`.
-* Format text using ESPnet's tokenizer.
-* Pass memory (encoder out) and tokenized text to `decoder` to get logits.
-* Gather log probabilities along the target token indices.
+For DPO and preference training, the dataset must be transformed into pairs:
 
-## 6. Training Pipeline (`trainers/`)
+```python
+{
+    "audio_path": str,
+    "chosen": str,
+    "rejected": str,
+}
+```
 
-### 6.1 DPO Trainer (`dpo_trainer.py`)
+Where:
 
-The agent must implement the standard DPO loss:
+* `chosen`: the formatted transcript preferred by the judge (e.g., disfluency removed, numbers normalized, punctuation corrected)
+* `rejected`: the raw or less-preferred transcript (e.g., contains `um`, `uh`, or non-normalized numeric forms)
 
-1. Initialize `policy_model` (trainable) and `reference_model` (frozen).
+### 5.4 Preference Pair Generation
+
+The preference-pair generator should:
+
+1. Take an input audio sample and its literal transcript.
+2. Sample $K$ candidate hypotheses from the base model.
+3. Compute a format score $S_{fmt}(y)$ based on rule-based checks or an LLM judge.
+4. Reject any hypothesis whose WER against the literal transcript exceeds a threshold.
+5. Rank all valid hypotheses by the combined objective.
+6. Choose the top-scoring candidate as `chosen` and the lowest-scoring valid candidate as `rejected`.
+
+The intended objective is roughly:
+
+$$
+S(y) = S_{fmt}(y) - \alpha \cdot \text{WER}(y, y_{verbatim})
+$$
+
+with the final pair defined as:
+
+* $y_{chosen} = \arg\max_y S(y)$
+* $y_{rejected} = \arg\min_y S(y)$ among valid hypotheses
+
+This matches the project goal of improving formatting while strongly constraining WER degradation.
+
+---
+
+## 6. Model Interface (`models/`)
+
+The project must define a base class that abstracts speech-model inference across different backends.
+
+```python
+class ASRModelInterface(ABC):
+    @abstractmethod
+    def forward_log_probs(self, audio, text) -> torch.Tensor:
+        ...
+
+    @abstractmethod
+    def generate(self, audio, **kwargs) -> str:
+        ...
+```
+
+### Required behavior
+
+1. `forward_log_probs(audio, text) -> torch.Tensor`
+   * Returns sequence log-probabilities for the given target text.
+2. `generate(audio, **kwargs) -> str`
+   * Returns decoded output text.
+
+### Implementation notes for ESPnet / OWSM v4
+
+If using ESPnet or OWSM v4 specifically:
+
+* Extract the encoder and decoder.
+* Pass audio features through the encoder.
+* Tokenize the target text using the tokenizer.
+* Feed encoder memory and target token IDs into the decoder.
+* Gather log-probabilities for the target token indices.
+
+This is the key operation needed for DPO and GRPO training, where the policy log-probability difference is computed between preferred and rejected sequences.
+
+---
+
+## 7. Training Pipeline (`trainers/`)
+
+### 7.1 SFT baseline
+
+The supervised baseline should be implemented first. It learns directly on formatted targets using standard teacher-forced cross-entropy. This serves as the reference control to compare against post-training methods.
+
+### 7.2 DPO Trainer
+
+The DPO trainer should:
+
+1. Initialize a trainable `policy_model` and a frozen `reference_model`.
 2. For a batch of `(audio, chosen, rejected)`:
-   * Compute $\pi_\theta(y_w \vert{} x)$ and $\pi_\theta(y_l \vert{} x)$ using `policy_model`.
-   * Compute $\pi_{ref}(y_w \vert{} x)$ and $\pi_{ref}(y_l \vert{} x)$ using `reference_model`.
-   * Calculate DPO Loss using PyTorch `F.logsigmoid`.
-3. Track metrics: Margin, chosen/rejected log probs, KL divergence.
+   * compute $\pi_\theta(y_w \mid x)$ and $\pi_\theta(y_l \mid x)$ with `policy_model`
+   * compute $\pi_{ref}(y_w \mid x)$ and $\pi_{ref}(y_l \mid x)$ with `reference_model`
+   * compute the DPO loss using `torch.nn.functional.logsigmoid`
+3. Track metrics such as:
+   * margin between chosen and rejected log-probs
+   * chosen log-probability
+   * rejected log-probability
+   * KL divergence between policy and reference
 
-### 6.2 GRPO Trainer (`grpo_trainer.py`)
+### 7.3 GRPO Trainer
 
-For GRPO (Group Relative Policy Optimization):
+For GRPO, each audio input $x$ produces $K$ sampled hypotheses.
 
-1. Sample $K$ hypotheses for each audio input $x$.
-2. Compute Reward $R(x, y)$ for each hypothesis:
-   * $R = \lambda_{format} \times \text{Format\_Score} - \lambda_{wer} \times \text{WER}$
-3. Normalize rewards within the group of $K$ samples to get Advantages $A_i$.
-4. Apply policy gradient loss using the advantages, constrained by KL divergence to the base model.
+1. Sample $K$ hypotheses $\{y_1, \dots, y_K\}$.
+2. Compute reward for each hypothesis:
+   * $R(x, y) = \lambda_{format} \times \text{Format\_Score}(y) - \lambda_{wer} \times \text{WER}(y, y_{ref})$
+3. Normalize rewards within the group to get advantages $A_i$.
+4. Use policy-gradient optimization constrained by KL divergence to the reference model.
 
-## 7. Evaluation Module (`evaluation/`)
+### 7.4 Controlled Experimental Track
 
-The agent must implement `eval_pipeline.py` to run inference on the test sets (LibriSpeech, TIMIT, FLEURS, TED-LIUM).
-Required metrics to log (e.g., to Weights & Biases):
+To ensure fair evaluation, all methods should be evaluated under matched conditions:
 
-* **Acoustic Fidelity**: `jiwer.wer(reference_verbatim, prediction)`
-* **Format Compliance**: Rule-based accuracy for numbers/dates, or LLM-based verification.
-* **Harmful Edit Rate**: Rate at which semantic meaning is changed (can use BERTScore or a semantic similarity model).
-* **Reward Hacking Tracker**: Log cases where Format Score increases BUT WER degrades by >15%.
+1. DPO / SimPO / IPO
+2. GRPO
+3. Learned verifier reward model + GRPO
+4. Rejection sampling fine-tuning (RSFT)
+5. SFT baseline
 
-## 8. Agent Instructions (Implementation Order)
+The project should keep data volume, model size, training budget, and inference budget as comparable as possible across methods so that differences reflect method quality rather than setup drift.
 
-1. **Setup & Dependencies**: Generate `requirements.txt` (torch, torchaudio, transformers, datasets, espnet, jiwer, trl).
-2. **Data Download & Loading**: Execute `download_datasets.sh` for open-source data. Implement the parsing logic for local restricted datasets and open-source ones. Write the preference pair generator.
-3. **Model Wrappers**: Implement the ESPnet/HF wrappers that output sequence log-probs.
-4. **Trainers**: Write `sft_trainer.py` first as a baseline. Then implement `dpo_trainer.py`.
-5. **Evaluation**: Implement the metrics and the end-to-end evaluation script.
-6. **Main**: Create `main.py` to parse arguments and trigger data-prep, train, or eval.
+---
+
+## 8. Evaluation Module (`evaluation/`)
+
+The evaluation pipeline should run inference on benchmark sets such as LibriSpeech, TIMIT, FLEURS, and TED-LIUM.
+
+Required metrics to log include:
+
+* Acoustic fidelity: `jiwer.wer(reference_verbatim, prediction)`
+* Format compliance rate: rule-based or LLM-based verification of number/date/entity formatting and disfluency removal
+* Harmful edit rate: percentage of submitted edits that alter meaning or remove factual content
+* Reward hacking tracker: cases where format score improves but WER degrades by more than 15%
+* KL divergence: distribution shift between policy and reference model
+
+The evaluation should be run after training and also during ablations to ensure the model is not trading recognition quality for better formatting.
+
+---
+
+## 9. Scientific Open Questions
+
+1. Domain generalization: do style alignment gains transfer to unseen acoustic domains and unseen format instructions?
+2. RL vs. matched SFT: does RL outperform SFT when both are trained on the same judge-filtered dataset?
+3. Robustness: can the formatted transcripts remain stable under noisy audio and long-tail named entities?
+4. Reward-model quality: how sensitive is the policy to reward model mis-specification or judge noise?
+
+---
+
+## 10. Agent Instructions (Implementation Order)
+
+1. Setup dependencies and environment.
+   * `torch`, `torchaudio`, `transformers`, `datasets`, `jiwer`, `trl`, `espnet`, `numpy`, `PyYAML`, `accelerate`, `wandb`.
+2. Prepare data.
+   * Download open datasets.
+   * Write local loaders for restricted datasets.
+   * Generate preference pairs from model hypotheses and rule-based or LLM scoring.
+3. Implement model wrappers.
+   * `ASRModelInterface`
+   * `HFASRWrapper`
+   * `EspnetASRWrapper`
+4. Implement training baselines.
+   * SFT baseline first.
+   * Then DPO trainer.
+   * Then GRPO trainer.
+5. Implement evaluation.
+   * WER, format compliance, harmful edit rate, reward-hacking tracker.
+6. Wire everything together in `main.py`.
+   * support `data_prep`, `train`, and `eval` tasks.
+
+---
+
+## 11. Summary
+
+This project is a controlled research effort to answer whether RL post-training can improve ASR transcript formatting in a way that is both user-aligned and acoustically safe. The specification intentionally couples two model backends, a preference-data pipeline, and a rigorous evaluation framework so that the final implementation can benchmark real style alignment gains without sacrificing recognition fidelity.
