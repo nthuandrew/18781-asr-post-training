@@ -1,17 +1,27 @@
 model:
-  name: "whisper-small"
-  cache_dir: "./cache"
+  tag: espnet/owsm_v4_base_102M
+  lang_sym: <eng>
+  task_sym: <asr>
+
+dataset:
+  path: google/fleurs
+  subset: en_us
+  train_split: train
+  eval_split: test
+  audio_column: audio
+  text_column: transcription
+  id_column: id
+  sampling_rate: 16000
+  train_examples: 16
+  eval_examples: 16
+  selection: head  # head or shuffle
 
 training:
-  output_dir: "./outputs/sft"
-  learning_rate: 1.0e-5
-  batch_size: 8
-  gradient_accumulation_steps: 1
-  epochs: 3
-  max_length: 512
-  warmup_steps: 500
+  steps: 10
+  learning_rate: 3.0e-5
+  max_grad_norm: 1.0
 
-logging:
-  log_every_steps: 50
-  save_every_steps: 500
-  use_wandb: false
+runtime:
+  seed: 13
+  device: cuda
+  output_dir: outputs/sft_smoke

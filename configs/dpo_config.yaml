@@ -1,19 +1,34 @@
 model:
-  policy_model: "whisper-small"
-  reference_model: "whisper-small"
-  cache_dir: "./cache"
+  tag: espnet/owsm_v4_base_102M
+  lang_sym: <eng>
+  task_sym: <asr>
+
+dataset:
+  path: google/fleurs
+  subset: en_us
+  train_split: train
+  eval_split: test
+  audio_column: audio
+  text_column: transcription
+  id_column: id
+  sampling_rate: 16000
+  train_examples: 16
+  eval_examples: 16
+  selection: head  # head or shuffle
 
 training:
-  output_dir: "./outputs/dpo"
+  steps: 5
   learning_rate: 5.0e-6
-  batch_size: 4
-  gradient_accumulation_steps: 1
-  epochs: 2
+  num_hypotheses: 4
   beta: 0.1
-  max_length: 512
-  max_prompt_length: 256
+  max_grad_norm: 1.0
 
-logging:
-  log_every_steps: 20
-  save_every_steps: 200
-  use_wandb: false
+reward:
+  format_weight: 1.0
+  wer_weight: 1.5
+  wer_tolerance: 0.0
+
+runtime:
+  seed: 13
+  device: cuda
+  output_dir: outputs/dpo_smoke

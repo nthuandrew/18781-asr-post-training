@@ -31,20 +31,40 @@ This repository contains an initial project scaffold for reinforcement learning 
 
 This is a first-pass skeleton intended to be extended into a production training pipeline.
 
-## FLEURS SFT vs. GRPO smoke experiment
+## Post-training experiments
 
-The repository includes a small end-to-end comparison based on the ESPnet3
-tutorial's FLEURS/OWSM data contract.  It starts SFT and GRPO from the same
-`espnet/owsm_v4_base_102M` checkpoint and evaluates base, SFT, and GRPO on the
-same held-out FLEURS test subset.
+SFT, DPO, and GRPO have separate entry points and configuration files:
 
 ```bash
-.venv/bin/python scripts/run_fleurs_sft_grpo.py \
-  --config configs/fleurs_sft_grpo_smoke.yaml \
-  --stage all
+.venv/bin/python scripts/run_sft.py --config configs/sft_config.yaml --stage all
+.venv/bin/python scripts/run_dpo.py --config configs/dpo_config.yaml --stage all
+.venv/bin/python scripts/run_grpo.py --config configs/grpo_config.yaml --stage all
 ```
 
-Results are written to `outputs/fleurs_sft_grpo_smoke/`, including checkpoints,
-per-example JSONL predictions, the resolved config, and `comparison.json`.
-The defaults are a pipeline smoke test, not a statistically meaningful result;
-increase examples and steps only after the small run succeeds.
+Each YAML file has the same `model`, `dataset`, and `runtime` sections.  The
+dataset is selected entirely through configuration; the default is FLEURS, but
+the runner only depends on the configured Hugging Face path, subset, splits,
+column names, and sample rate:
+
+```yaml
+dataset:
+  path: google/fleurs
+  subset: en_us
+  train_split: train
+  eval_split: test
+  audio_column: audio
+  text_column: transcription
+  id_column: id
+  sampling_rate: 16000
+  train_examples: 16
+  eval_examples: 16
+  selection: head
+```
+
+To transition to another Hugging Face speech dataset, update those fields and
+the model language symbol if needed.  Method-specific hyperparameters stay in
+the `training` section; DPO and GRPO reward weights stay in `reward`.
+
+Each run writes its checkpoint, resolved config, per-example JSONL predictions,
+and `comparison.json` below the configured `runtime.output_dir`.  The defaults
+are smoke tests rather than statistically meaningful training budgets.

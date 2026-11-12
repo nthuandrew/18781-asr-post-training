@@ -20,7 +20,7 @@ def _load_yaml(path: str) -> dict[str, Any]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="ASR RL alignment training and evaluation pipeline.")
     parser.add_argument("--task", choices=["data_prep", "train", "eval"], default="train")
-    parser.add_argument("--config", type=str, default="configs/owsm_fleurs_config.yaml")
+    parser.add_argument("--config", type=str, default="configs/sft_config.yaml")
     parser.add_argument("--model_name_or_path", type=str, default="")
     parser.add_argument("--dataset", choices=["fleurs", "all"], default="fleurs")
     parser.add_argument("--dataset_root", type=str, default="./data")
@@ -76,7 +76,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Loaded configuration keys: {sorted(config.keys())}")
 
         model_backend = config.get("model", {}).get("backend") or "owsm_v4"
-        model_name = args.model_name_or_path or config.get("model", {}).get("model_name_or_path") or config.get("model", {}).get("name")
+        model_name = (
+            args.model_name_or_path
+            or config.get("model", {}).get("tag")
+            or config.get("model", {}).get("model_name_or_path")
+            or config.get("model", {}).get("name")
+        )
         print(f"Model backend: {model_backend}")
         if model_name:
             print(f"Model target: {model_name}")
@@ -90,7 +95,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             learning_rate=float(config.get("training", {}).get("learning_rate", SFTConfig.learning_rate)),
             batch_size=int(config.get("training", {}).get("batch_size", SFTConfig.batch_size)),
             epochs=int(config.get("training", {}).get("epochs", SFTConfig.epochs)),
-            output_dir=str(config.get("training", {}).get("output_dir", SFTConfig.output_dir)),
+            output_dir=str(config.get("runtime", {}).get("output_dir", SFTConfig.output_dir)),
         )
         trainer = SFTTrainer(model=None, config=sft_cfg)
         print(f"Trainer initialized; output_dir={trainer.save()}")
