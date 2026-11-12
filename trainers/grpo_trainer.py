@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable, List, Sequence
 
+from evaluation.metrics import compute_format_reward
+
 
 @dataclass
 class GRPOConfig:
@@ -25,15 +27,13 @@ class GRPOTrainer:
         self.config = config or GRPOConfig()
 
     def compute_rewards(self, hypotheses: Sequence[str], reference: str) -> List[float]:
-        """Compute a reward for each hypothesis in a group."""
+        """Compute a reward for each hypothesis in a group using the ASR format-alignment objective."""
         rewards: List[float] = []
         for hypothesis in hypotheses:
-            reward = 0.0
-            if hypothesis.strip() == reference.strip():
-                reward += 1.0
-            if hypothesis.strip() and hypothesis.strip() != reference.strip():
-                reward -= 0.05
-            rewards.append(reward)
+            reward = compute_format_reward(reference, hypothesis)
+            if not hypothesis.strip():
+                reward -= 1.0
+            rewards.append(float(reward))
         return rewards
 
     def train(self, dataset: Iterable[Any]) -> None:

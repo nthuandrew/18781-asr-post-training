@@ -1,0 +1,37 @@
+model:
+  backend: "owsm_v4"
+  model_name_or_path: "espnet/owsm_v4"
+  cache_dir: "./cache/owsm_v4"
+  freeze_reference: true
+
+experiment:
+  name: "owsm_fleurs_format_alignment"
+  dataset: "fleurs"
+  language: "en_us"
+  split: "test"
+  max_examples: 200
+  reward_mode: "format_compliance"
+  wer_tolerance: 0.0
+  max_generation_hypotheses: 4
+
+training:
+  output_dir: "./outputs/owsm_fleurs"
+  learning_rate: 5.0e-6
+  batch_size: 4
+  epochs: 2
+  beta: 0.1
+  max_length: 512
+  max_prompt_length: 256
+
+logging:
+  log_every_steps: 20
+  save_every_steps: 200
+  use_wandb: false
+
+evaluation:
+  metrics:
+    - wer
+    - format_compliance
+    - harmful_edit_rate
+    - reward_hacking
+  reward_hacking_threshold: 0.15

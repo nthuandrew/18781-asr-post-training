@@ -38,10 +38,11 @@ class DPOTrainer:
         For a preference pair, the DPO objective maximizes the relative preference margin
         between the preferred and dispreferred target sequences.
         """
-        chosen_margin = logp_chosen - log_ref_chosen
-        rejected_margin = logp_rejected - log_ref_rejected
+        chosen_margin = float(logp_chosen) - float(log_ref_chosen)
+        rejected_margin = float(logp_rejected) - float(log_ref_rejected)
         reward_diff = chosen_margin - rejected_margin
-        return float(-torch.nn.functional.logsigmoid(torch.tensor(self.config.beta * reward_diff)).item())
+        loss = -torch.nn.functional.logsigmoid(torch.tensor(float(self.config.beta * reward_diff)))
+        return float(loss.detach().item())
 
     def train(self, dataset: Iterable[Sequence[str]]) -> None:
         """Run the DPO training loop scaffold and accumulate a real preference margin per batch."""

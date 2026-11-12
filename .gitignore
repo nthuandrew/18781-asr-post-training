@@ -17,3 +17,5 @@ checkpoints/
 # IDE
 .vscode/
 .idea/
+
+*.wav

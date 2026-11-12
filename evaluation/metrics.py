@@ -12,7 +12,8 @@ except ImportError:  # pragma: no cover - jiwer is optional for lightweight envi
 
 
 def _normalize_text(text: str) -> str:
-    return re.sub(r"\s+", " ", text or "").strip()
+    normalized = re.sub(r"[^a-z0-9]+", " ", (text or "").lower())
+    return re.sub(r"\s+", " ", normalized).strip()
 
 
 def _levenshtein_distance(reference: str, hypothesis: str) -> int:
@@ -58,7 +59,7 @@ def wer_score(reference: str, prediction: str) -> float:
 
 def format_compliance(text: str) -> float:
     """Heuristic score for formatting quality: clean text with numbers is rewarded, disfluencies are rejected."""
-    normalized = _normalize_text(text).lower()
+    normalized = _normalize_text(text)
     if not normalized:
         return 0.0
 
@@ -69,7 +70,23 @@ def format_compliance(text: str) -> float:
     score = 0.5
     if re.search(r"\b\d+(?:\.\d+)?\b", normalized):
         score += 0.5
-    return score
+    if re.search(r"[.!?]$", normalized):
+        score += 0.25
+    return min(score, 1.0)
+
+
+def compute_format_reward(
+    reference: str,
+    hypothesis: str,
+    format_weight: float = 1.0,
+    wer_weight: float = 1.5,
+    wer_tolerance: float = 0.0,
+) -> float:
+    """Compute a reward that prefers clean text while penalizing WER regression."""
+    format_score = format_compliance(hypothesis)
+    wer = wer_score(reference, hypothesis)
+    penalty = max(wer, wer_tolerance)
+    return float(format_weight * format_score - wer_weight * penalty)
 
 
 def harmful_edit_rate(reference: str, prediction: str) -> float:

@@ -192,3 +192,48 @@ def build_fleurs_preference_pairs(
             "reference": transcript,
         })
     return pairs
+
+
+def build_fleurs_training_batch(
+    rows: Sequence[Dict[str, str]],
+    max_examples: int | None = None,
+    *,
+    reward_weight_format: float = 1.0,
+    reward_weight_wer: float = 1.5,
+) -> List[Dict[str, Any]]:
+    """Build a batch contract for ASR RL training with chosen/rejected targets and reward metadata."""
+    batch: List[Dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        if max_examples is not None and index >= max_examples:
+            break
+
+        reference = str(row.get("transcript", "")).strip()
+        if not reference:
+            continue
+
+        formatted = str(row.get("formatted_transcript", format_transcript_for_fleurs(reference))).strip()
+        pair = build_fleurs_preference_pairs([row], max_pairs=1)[0]
+        chosen = pair["chosen"]
+        rejected = pair["rejected"]
+
+        reward = 0.0
+        if chosen:
+            from evaluation.metrics import compute_format_reward
+            reward = compute_format_reward(
+                reference,
+                chosen,
+                format_weight=reward_weight_format,
+                wer_weight=reward_weight_wer,
+            )
+
+        batch.append(
+            {
+                "audio_path": str(row.get("audio_path", row.get("id", ""))),
+                "reference": reference,
+                "chosen": chosen,
+                "rejected": rejected,
+                "formatted": formatted,
+                "reward": float(reward),
+            }
+        )
+    return batch
