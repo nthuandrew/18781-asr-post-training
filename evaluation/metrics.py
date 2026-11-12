@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Dict, List
+from typing import Dict
 
 try:
     from jiwer import wer as jiwer_wer
@@ -58,19 +58,24 @@ def wer_score(reference: str, prediction: str) -> float:
 
 
 def format_compliance(text: str) -> float:
-    """Heuristic score for formatting quality: clean text with numbers is rewarded, disfluencies are rejected."""
+    """Score basic transcript formatting without judging lexical accuracy.
+
+    The score is intentionally simple and auditable.  Lexical correctness is
+    measured separately with WER, so this function only checks disfluencies,
+    casing, punctuation, and written-number usage.
+    """
     normalized = _normalize_text(text)
     if not normalized:
         return 0.0
 
-    disfluency_tokens = {"um", "uh", "erm", "mm", "like", "you know"}
-    if any(token in normalized.split() for token in disfluency_tokens):
-        return 0.0
-
-    score = 0.5
-    if re.search(r"\b\d+(?:\.\d+)?\b", normalized):
-        score += 0.5
-    if re.search(r"[.!?]$", normalized):
+    has_disfluency = bool(re.search(r"\b(?:um|uh|erm|mm|you\s+know)\b", normalized))
+    score = 0.25 if not has_disfluency else 0.0
+    stripped = (text or "").strip()
+    if stripped[:1].isupper():
+        score += 0.25
+    if re.search(r"[.!?][\"')\]]?$", stripped):
+        score += 0.25
+    if re.search(r"\b\d+(?:[.,]\d+)?\b", stripped):
         score += 0.25
     return min(score, 1.0)
 
@@ -85,7 +90,7 @@ def compute_format_reward(
     """Compute a reward that prefers clean text while penalizing WER regression."""
     format_score = format_compliance(hypothesis)
     wer = wer_score(reference, hypothesis)
-    penalty = max(wer, wer_tolerance)
+    penalty = max(0.0, wer - wer_tolerance)
     return float(format_weight * format_score - wer_weight * penalty)
 
 

@@ -30,3 +30,21 @@ This repository contains an initial project scaffold for reinforcement learning 
 ## Notes
 
 This is a first-pass skeleton intended to be extended into a production training pipeline.
+
+## FLEURS SFT vs. GRPO smoke experiment
+
+The repository includes a small end-to-end comparison based on the ESPnet3
+tutorial's FLEURS/OWSM data contract.  It starts SFT and GRPO from the same
+`espnet/owsm_v4_base_102M` checkpoint and evaluates base, SFT, and GRPO on the
+same held-out FLEURS test subset.
+
+```bash
+.venv/bin/python scripts/run_fleurs_sft_grpo.py \
+  --config configs/fleurs_sft_grpo_smoke.yaml \
+  --stage all
+```
+
+Results are written to `outputs/fleurs_sft_grpo_smoke/`, including checkpoints,
+per-example JSONL predictions, the resolved config, and `comparison.json`.
+The defaults are a pipeline smoke test, not a statistically meaningful result;
+increase examples and steps only after the small run succeeds.
