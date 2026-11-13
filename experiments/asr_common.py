@@ -249,6 +249,46 @@ class OWSMModel:
             batch[f"{key}_lengths"] = torch.tensor([tensor.shape[0]], device=self.device)
         return batch
 
+    def preprocess_batch(
+        self,
+        samples: Sequence[dict[str, Any]],
+        targets: Sequence[str] | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Preprocess and pad multiple examples into one true model batch."""
+        if not samples:
+            raise ValueError("Cannot preprocess an empty batch")
+        if targets is not None and len(targets) != len(samples):
+            raise ValueError("targets must have the same length as samples")
+
+        encoded_rows: list[dict[str, Any]] = []
+        for index, sample in enumerate(samples):
+            target = None if targets is None else targets[index]
+            encoded_rows.append(
+                self.preprocessor(
+                    str(sample.get("id", index)), self.raw_example(sample, target)
+                )
+            )
+
+        batch: dict[str, torch.Tensor] = {}
+        for key in encoded_rows[0]:
+            tensors: list[torch.Tensor] = []
+            for row in encoded_rows:
+                value = row[key]
+                tensor = (
+                    torch.from_numpy(value)
+                    if isinstance(value, np.ndarray)
+                    else torch.as_tensor(value)
+                )
+                tensors.append(tensor.to(self.device))
+            pad_value = 0.0 if tensors[0].is_floating_point() else self.model.ignore_id
+            batch[key] = pad_list(tensors, pad_value)
+            batch[f"{key}_lengths"] = torch.tensor(
+                [tensor.shape[0] for tensor in tensors],
+                device=self.device,
+                dtype=torch.long,
+            )
+        return batch
+
     def generate(self, speech: np.ndarray) -> list[str]:
         self.model.eval()
         with torch.inference_mode():
@@ -265,6 +305,21 @@ class OWSMModel:
         self.model.train()
         loss, _, _ = self.model(**self.preprocess(sample))
         return loss
+
+    def sft_loss_batch(
+        self, samples: Sequence[dict[str, Any]]
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        """Compute one vectorized SFT forward pass for a padded sample batch."""
+        self.model.train()
+        loss, stats, _ = self.model(**self.preprocess_batch(samples))
+        scalar_stats: dict[str, float] = {}
+        for key, value in (stats or {}).items():
+            if value is None:
+                continue
+            tensor = value.detach()
+            if tensor.numel() == 1:
+                scalar_stats[key] = float(tensor.cpu())
+        return loss, scalar_stats
 
     def sequence_log_probs(
         self,

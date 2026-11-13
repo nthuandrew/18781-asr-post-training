@@ -75,16 +75,19 @@ def train(config: SFTConfig, train_set: ASRDataset) -> Path:
             range(0, total_steps, config.training.batch_size)
         ):
             batch_end = min(batch_start + config.training.batch_size, total_steps)
-            samples = [train_set[step % len(train_set)] for step in range(batch_start, batch_end)]
+            samples = [
+                train_set[step % len(train_set)] for step in range(batch_start, batch_end)
+            ]
+            if runner.device.type == "cuda":
+                torch.cuda.reset_peak_memory_stats(runner.device)
             optimizer.zero_grad(set_to_none=True)
-            sample_losses = [runner.sft_loss(sample) for sample in samples]
-            loss = torch.stack(sample_losses).mean()
+            loss, component_metrics = runner.sft_loss_batch(samples)
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(
                 runner.model.parameters(), config.training.max_grad_norm
             )
             optimizer.step()
-            loss_values = [float(value.detach().cpu()) for value in sample_losses]
+            speech_lengths = [len(sample["speech"]) for sample in samples]
             record: dict[str, Any] = {
                 "optimizer_step": optimizer_step,
                 "sample_step_start": batch_start,
@@ -92,13 +95,32 @@ def train(config: SFTConfig, train_set: ASRDataset) -> Path:
                 "epoch": batch_start // len(train_set) + 1,
                 "batch_size": len(samples),
                 "loss": float(loss.detach().cpu()),
-                "sample_losses": loss_values,
+                "component_metrics": component_metrics,
                 "sample_ids": [sample["id"] for sample in samples],
-                "loss_min": min(loss_values),
-                "loss_max": max(loss_values),
+                "speech_samples_min": min(speech_lengths),
+                "speech_samples_max": max(speech_lengths),
+                "speech_seconds_total": float(
+                    sum(speech_lengths) / config.common.dataset.sampling_rate
+                ),
+                "reference_words_total": sum(
+                    len(sample["reference"].split()) for sample in samples
+                ),
                 "grad_norm": float(grad_norm.detach().cpu()),
                 "learning_rate": float(optimizer.param_groups[0]["lr"]),
             }
+            if runner.device.type == "cuda":
+                record["gpu_memory_allocated_gb"] = float(
+                    torch.cuda.memory_allocated(runner.device) / 1024**3
+                )
+                record["gpu_memory_reserved_gb"] = float(
+                    torch.cuda.memory_reserved(runner.device) / 1024**3
+                )
+                record["gpu_peak_memory_allocated_gb"] = float(
+                    torch.cuda.max_memory_allocated(runner.device) / 1024**3
+                )
+                record["gpu_peak_memory_reserved_gb"] = float(
+                    torch.cuda.max_memory_reserved(runner.device) / 1024**3
+                )
             history.append(record)
             logger.write(record)
             progress.update(len(samples))
@@ -113,7 +135,7 @@ def train(config: SFTConfig, train_set: ASRDataset) -> Path:
         {
             "state_dict": runner.model.state_dict(),
             "history": history,
-            "losses": [float(value) for row in history for value in row["sample_losses"]],
+            "losses": [float(row["loss"]) for row in history],
             "config": config.to_dict(),
         },
         path,
