@@ -23,7 +23,7 @@ training:
   num_hypotheses: 16
   beta: 0.1
   max_grad_norm: 2.0
-  batch_size: 2
+  batch_size: 8
   log_candidates: false
   min_reward_margin: 0.05
   max_chosen_wer: 0.15

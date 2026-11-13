@@ -24,7 +24,7 @@ training:
   clip_epsilon: 0.2
   kl_beta: 0.01
   max_grad_norm: 2.0
-  batch_size: 2
+  batch_size: 8
   log_candidates: false
   optimization_epochs: 4
 

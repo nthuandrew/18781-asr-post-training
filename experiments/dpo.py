@@ -139,21 +139,62 @@ def train(config: DPOConfig, train_set: ASRDataset) -> Path:
         nonlocal optimizer_step
         if not pending:
             return
+        samples = [item["sample"] for item in pending]
+        pairs = [[item["chosen"], item["rejected"]] for item in pending]
+        runner.model.eval()
+        if runner.device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(runner.device)
+        with torch.no_grad():
+            policy_model = runner.model
+            runner.model = reference
+            reference_logps = runner.batch_sequence_log_probs(
+                samples, pairs, length_normalize=False
+            )
+            runner.model = policy_model
+        policy_logps = runner.batch_sequence_log_probs(
+            samples, pairs, length_normalize=False
+        )
+        loss_outputs = [
+            dpo_loss(policy_group, reference_group, training.beta)
+            for policy_group, reference_group in zip(policy_logps, reference_logps)
+        ]
+        losses = [output[0] for output in loss_outputs]
+        logit_tensors = [output[1] for output in loss_outputs]
         optimizer.zero_grad(set_to_none=True)
-        batch_loss = torch.stack([item["loss"] for item in pending]).mean()
+        batch_loss = torch.stack(losses).mean()
         batch_loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(
             runner.model.parameters(), training.max_grad_norm
         )
         optimizer.step()
-        logits = [float(item["logit"].detach().cpu()) for item in pending]
-        losses = [float(item["loss"].detach().cpu()) for item in pending]
+        logits = [float(value.detach().cpu()) for value in logit_tensors]
+        loss_values = [float(value.detach().cpu()) for value in losses]
+        policy_margins = [
+            float((values[0] - values[1]).detach().cpu()) for values in policy_logps
+        ]
+        reference_margins = [
+            float((values[0] - values[1]).cpu()) for values in reference_logps
+        ]
+        for index, item in enumerate(pending):
+            item["sample_record"].update(
+                {
+                    "policy_logps": [
+                        float(value) for value in policy_logps[index].detach().cpu()
+                    ],
+                    "reference_logps": [
+                        float(value) for value in reference_logps[index].cpu()
+                    ],
+                    "loss": loss_values[index],
+                    "preference_logit": logits[index],
+                }
+            )
+            sample_logger.write(item["sample_record"])
         record: dict[str, Any] = {
             "optimizer_step": optimizer_step,
             "epoch": pending[0]["epoch"],
             "batch_size": len(pending),
             "loss": float(batch_loss.detach().cpu()),
-            "sample_losses": losses,
+            "sample_losses": loss_values,
             "preference_logit": float(np.mean(logits)),
             "preference_logits": logits,
             "reward_margin": float(np.mean([item["reward_margin"] for item in pending])),
@@ -161,13 +202,20 @@ def train(config: DPOConfig, train_set: ASRDataset) -> Path:
             "rejected_reward": float(np.mean([item["rejected_reward"] for item in pending])),
             "chosen_wer": float(np.mean([item["chosen_wer"] for item in pending])),
             "rejected_wer": float(np.mean([item["rejected_wer"] for item in pending])),
-            "policy_margin": float(np.mean([item["policy_margin"] for item in pending])),
-            "reference_margin": float(np.mean([item["reference_margin"] for item in pending])),
+            "policy_margin": float(np.mean(policy_margins)),
+            "reference_margin": float(np.mean(reference_margins)),
             "grad_norm": float(grad_norm.detach().cpu()),
             "learning_rate": float(optimizer.param_groups[0]["lr"]),
             "sample_ids": [item["sample_id"] for item in pending],
             "skipped_samples_so_far": skipped,
         }
+        if runner.device.type == "cuda":
+            record["gpu_peak_memory_allocated_gb"] = float(
+                torch.cuda.max_memory_allocated(runner.device) / 1024**3
+            )
+            record["gpu_peak_memory_reserved_gb"] = float(
+                torch.cuda.max_memory_reserved(runner.device) / 1024**3
+            )
         history.append(record)
         training_logger.write(record)
         optimizer_step += 1
@@ -225,18 +273,6 @@ def train(config: DPOConfig, train_set: ASRDataset) -> Path:
                 chosen, rejected = pair
                 chosen_index = hypotheses.index(chosen)
                 rejected_index = hypotheses.index(rejected)
-                runner.model.eval()
-                policy_logps = runner.sequence_log_probs(
-                    sample, [chosen, rejected], length_normalize=False
-                )
-                with torch.no_grad():
-                    policy_model = runner.model
-                    runner.model = reference
-                    reference_logps = runner.sequence_log_probs(
-                        sample, [chosen, rejected], length_normalize=False
-                    )
-                    runner.model = policy_model
-                loss, logit = dpo_loss(policy_logps, reference_logps, training.beta)
                 sample_record.update(
                     {
                         "chosen_index": chosen_index,
@@ -247,17 +283,14 @@ def train(config: DPOConfig, train_set: ASRDataset) -> Path:
                         "rejected_reward": float(rewards[rejected_index]),
                         "chosen_wer": float(wers[chosen_index]),
                         "rejected_wer": float(wers[rejected_index]),
-                        "policy_logps": [float(value) for value in policy_logps.detach().cpu()],
-                        "reference_logps": [float(value) for value in reference_logps.cpu()],
-                        "loss": float(loss.detach().cpu()),
-                        "preference_logit": float(logit.detach().cpu()),
                     }
                 )
-                sample_logger.write(sample_record)
                 pending.append(
                     {
-                        "loss": loss,
-                        "logit": logit,
+                        "sample": sample,
+                        "sample_record": sample_record,
+                        "chosen": chosen,
+                        "rejected": rejected,
                         "epoch": sample_record["epoch"],
                         "sample_id": sample["id"],
                         "reward_margin": rewards[chosen_index] - rewards[rejected_index],
@@ -265,8 +298,6 @@ def train(config: DPOConfig, train_set: ASRDataset) -> Path:
                         "rejected_reward": rewards[rejected_index],
                         "chosen_wer": wers[chosen_index],
                         "rejected_wer": wers[rejected_index],
-                        "policy_margin": float((policy_logps[0] - policy_logps[1]).detach().cpu()),
-                        "reference_margin": float((reference_logps[0] - reference_logps[1]).cpu()),
                     }
                 )
             if len(pending) >= training.batch_size or (step + 1) % len(train_set) == 0:

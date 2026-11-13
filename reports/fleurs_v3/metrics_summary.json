@@ -1,0 +1,32 @@
+{
+  "Base": {
+    "wer": 0.13029518842849272,
+    "format_compliance": 0.7037609479649666,
+    "harmful_edit_rate": 0.10815473260029083,
+    "number_normalized_wer": 0.1275429802606859
+  },
+  "SFT (raw)": {
+    "wer": 0.11965772778726144,
+    "format_compliance": 0.401854714064915,
+    "harmful_edit_rate": 0.10219524552761859,
+    "number_normalized_wer": 0.11810280050804739
+  },
+  "SFT (preprocessed)": {
+    "wer": 0.1269165640880182,
+    "format_compliance": 0.7712519319938176,
+    "harmful_edit_rate": 0.11090070542985878,
+    "number_normalized_wer": 0.11724836675110445
+  },
+  "DPO": {
+    "wer": 0.1284220216034568,
+    "format_compliance": 0.779495105615662,
+    "harmful_edit_rate": 0.11169055878082902,
+    "number_normalized_wer": 0.11992122880384273
+  },
+  "GRPO": {
+    "wer": 0.13143675813912606,
+    "format_compliance": 0.7815558990211232,
+    "harmful_edit_rate": 0.11424335707509403,
+    "number_normalized_wer": 0.12256034393129665
+  }
+}

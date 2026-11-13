@@ -8,6 +8,10 @@ from experiments.asr_common import (
 )
 from experiments.dpo import dpo_loss, select_preference_pair
 from experiments.grpo import group_advantages
+from data_prep.text_preprocessing import (
+    format_sft_target_v1,
+    inverse_normalize_number_words,
+)
 
 
 def test_dataset_is_selected_from_config() -> None:
@@ -110,3 +114,25 @@ def test_aggregate_metrics() -> None:
         ]
     )
     assert summary == {"wer": 0.5, "format_compliance": 0.5, "harmful_edit_rate": 0.5}
+
+
+def test_sft_target_preprocessing_preserves_words_around_numbers() -> None:
+    text = "prides include one to three males and as many as thirty females"
+    assert format_sft_target_v1(text) == (
+        "prides include 1 to 3 males and as many as 30 females."
+    )
+
+
+def test_sft_target_preprocessing_handles_years_and_ordinals() -> None:
+    assert inverse_normalize_number_words("in the twentieth century") == (
+        "in the 20th century"
+    )
+    assert inverse_normalize_number_words("on fifteen august nineteen forty") == (
+        "on 15 august 1940"
+    )
+
+
+def test_sft_target_preprocessing_keeps_existing_numeric_entities() -> None:
+    assert format_sft_target_v1("compatible with 802.11a and 32%") == (
+        "compatible with 802.11a and 32%."
+    )

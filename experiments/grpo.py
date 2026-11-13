@@ -112,14 +112,41 @@ def train(config: GRPOConfig, train_set: ASRDataset) -> Path:
         nonlocal optimizer_step
         if not pending:
             return
+        samples = [group["sample"] for group in pending]
+        hypothesis_groups = [group["hypotheses"] for group in pending]
+        runner.model.eval()
+        if runner.device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(runner.device)
+        with torch.no_grad():
+            old_logps = runner.batch_sequence_log_probs(
+                samples, hypothesis_groups, length_normalize=True
+            )
+            policy_model = runner.model
+            runner.model = reference
+            reference_logps = runner.batch_sequence_log_probs(
+                samples, hypothesis_groups, length_normalize=True
+            )
+            runner.model = policy_model
+        for group, old_logp, reference_logp in zip(
+            pending, old_logps, reference_logps
+        ):
+            group["old_logp"] = old_logp
+            group["reference_logp"] = reference_logp
+            group["sample_record"]["old_policy_logps"] = [
+                float(value) for value in old_logp.cpu()
+            ]
+            group["sample_record"]["reference_logps"] = [
+                float(value) for value in reference_logp.cpu()
+            ]
+            sample_logger.write(group["sample_record"])
         for optimization_epoch in range(training.optimization_epochs):
             optimizer.zero_grad(set_to_none=True)
             group_metrics: list[dict[str, Any]] = []
             group_losses: list[torch.Tensor] = []
-            for group in pending:
-                policy_logp = runner.sequence_log_probs(
-                    group["sample"], group["hypotheses"], length_normalize=True
-                )
+            policy_logps = runner.batch_sequence_log_probs(
+                samples, hypothesis_groups, length_normalize=True
+            )
+            for group, policy_logp in zip(pending, policy_logps):
                 ratio = torch.exp(policy_logp - group["old_logp"])
                 clipped = ratio.clamp(
                     1.0 - training.clip_epsilon, 1.0 + training.clip_epsilon
@@ -176,6 +203,13 @@ def train(config: GRPOConfig, train_set: ASRDataset) -> Path:
                 "group_metrics": group_metrics,
                 "skipped_samples_so_far": skipped,
             }
+            if runner.device.type == "cuda":
+                record["gpu_peak_memory_allocated_gb"] = float(
+                    torch.cuda.max_memory_allocated(runner.device) / 1024**3
+                )
+                record["gpu_peak_memory_reserved_gb"] = float(
+                    torch.cuda.max_memory_reserved(runner.device) / 1024**3
+                )
             history.append(record)
             training_logger.write(record)
             optimizer_step += 1
@@ -226,27 +260,12 @@ def train(config: GRPOConfig, train_set: ASRDataset) -> Path:
                 sample_logger.write(sample_record)
                 progress.set_postfix(status="skipped: no reward variance")
             else:
-                runner.model.eval()
-                with torch.no_grad():
-                    old_logp = runner.sequence_log_probs(
-                        sample, hypotheses, length_normalize=True
-                    )
-                    policy_model = runner.model
-                    runner.model = reference
-                    reference_logp = runner.sequence_log_probs(
-                        sample, hypotheses, length_normalize=True
-                    )
-                    runner.model = policy_model
-                sample_record["old_policy_logps"] = [float(value) for value in old_logp.cpu()]
-                sample_record["reference_logps"] = [float(value) for value in reference_logp.cpu()]
-                sample_logger.write(sample_record)
                 pending.append(
                     {
                         "sample": sample,
+                        "sample_record": sample_record,
                         "hypotheses": hypotheses,
                         "advantages": advantages,
-                        "old_logp": old_logp,
-                        "reference_logp": reference_logp,
                         "mean_reward": float(np.mean(rewards)),
                         "reward_std": float(np.std(rewards)),
                         "epoch": sample_record["epoch"],

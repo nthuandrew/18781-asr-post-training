@@ -21,6 +21,7 @@ from espnet2.legacy.nets.pytorch_backend.nets_utils import pad_list
 from espnet2.train.preprocessor import S2TPreprocessor
 from tqdm.auto import tqdm
 
+from data_prep.text_preprocessing import transform_training_text
 from evaluation.metrics import compute_metrics
 
 
@@ -44,6 +45,7 @@ class DatasetConfig:
     train_examples: int | None = 16
     eval_examples: int | None = 16
     selection: str = "head"
+    train_text_transform: str = "none"
 
 
 @dataclass
@@ -167,6 +169,7 @@ class ASRDataset:
             dataset = dataset.select(range(min(int(limit), len(dataset))))
         self.dataset = dataset.cast_column(config.audio_column, Audio(decode=False))
         self.config = config
+        self.train = train
 
     def __len__(self) -> int:
         return len(self.dataset)
@@ -187,10 +190,17 @@ class ASRDataset:
                 f"Expected {self.config.sampling_rate} Hz audio, got {sample_rate}; "
                 "resampling is not implemented in this adapter"
             )
+        raw_reference = str(row[self.config.text_column]).strip()
+        reference = (
+            transform_training_text(raw_reference, self.config.train_text_transform)
+            if self.train
+            else raw_reference
+        )
         return {
             "id": str(row.get(self.config.id_column, index)),
             "speech": np.asarray(speech, dtype=np.float32),
-            "reference": str(row[self.config.text_column]).strip(),
+            "reference": reference,
+            "raw_reference": raw_reference,
         }
 
 
@@ -331,18 +341,51 @@ class OWSMModel:
         """Return teacher-forced sequence log-probabilities for hypotheses."""
         if not hypotheses:
             return torch.empty(0, device=self.device)
-        encoded = [self.preprocess(sample, hypothesis) for hypothesis in hypotheses]
-        texts = [item["text"].squeeze(0) for item in encoded]
-        text_prevs = [item["text_prev"].squeeze(0) for item in encoded]
+        return self.batch_sequence_log_probs(
+            [sample], [hypotheses], length_normalize=length_normalize
+        )[0]
+
+    def batch_sequence_log_probs(
+        self,
+        samples: Sequence[dict[str, Any]],
+        hypotheses_per_sample: Sequence[Sequence[str]],
+        *,
+        length_normalize: bool,
+    ) -> list[torch.Tensor]:
+        """Score hypotheses for multiple utterances in one encoder/decoder pass."""
+        if not samples:
+            return []
+        if len(samples) != len(hypotheses_per_sample):
+            raise ValueError("Each sample must have one hypothesis group")
+        if any(not hypotheses for hypotheses in hypotheses_per_sample):
+            raise ValueError("Hypothesis groups must not be empty")
+
+        speech_batch = self.preprocess_batch(samples)
+        encoded_targets: list[dict[str, torch.Tensor]] = []
+        group_indices: list[int] = []
+        group_sizes: list[int] = []
+        for group_index, (sample, hypotheses) in enumerate(
+            zip(samples, hypotheses_per_sample)
+        ):
+            group_sizes.append(len(hypotheses))
+            for hypothesis in hypotheses:
+                encoded_targets.append(self.preprocess(sample, hypothesis))
+                group_indices.append(group_index)
+
+        texts = [item["text"].squeeze(0) for item in encoded_targets]
+        text_prevs = [item["text_prev"].squeeze(0) for item in encoded_targets]
         text_pad = pad_list(texts, self.model.ignore_id)
 
         encoder_out, encoder_lens = self.model.encode(
-            encoded[0]["speech"], encoded[0]["speech_lengths"]
+            speech_batch["speech"], speech_batch["speech_lengths"]
         )
         if isinstance(encoder_out, tuple):
             encoder_out = encoder_out[0]
-        encoder_out = encoder_out.expand(len(hypotheses), -1, -1)
-        encoder_lens = encoder_lens.expand(len(hypotheses))
+        encoder_indices = torch.tensor(
+            group_indices, device=self.device, dtype=torch.long
+        )
+        encoder_out = encoder_out.index_select(0, encoder_indices)
+        encoder_lens = encoder_lens.index_select(0, encoder_indices)
 
         sos = text_pad.new_tensor([self.model.sos])
         eos = text_pad.new_tensor([self.model.eos])
@@ -365,7 +408,7 @@ class OWSMModel:
         sequence_log_probs = (token_log_probs * mask).sum(dim=1)
         if length_normalize:
             sequence_log_probs = sequence_log_probs / mask.sum(dim=1).clamp_min(1)
-        return sequence_log_probs
+        return list(sequence_log_probs.split(group_sizes))
 
 
 def evaluate(
