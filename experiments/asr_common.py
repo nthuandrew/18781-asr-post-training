@@ -19,6 +19,7 @@ from datasets import Audio, load_dataset
 from espnet2.bin.s2t_inference import Speech2Text
 from espnet2.legacy.nets.pytorch_backend.nets_utils import pad_list
 from espnet2.train.preprocessor import S2TPreprocessor
+from tqdm.auto import tqdm
 
 from evaluation.metrics import compute_metrics
 
@@ -287,7 +288,13 @@ def evaluate(
     prediction_path = Path(common.runtime.output_dir) / f"{name}_predictions.jsonl"
     prediction_path.parent.mkdir(parents=True, exist_ok=True)
     with prediction_path.open("w", encoding="utf-8") as handle:
-        for index in range(len(eval_set)):
+        progress = tqdm(
+            range(len(eval_set)),
+            desc=f"{name} eval",
+            unit="sample",
+            dynamic_ncols=True,
+        )
+        for index in progress:
             sample = eval_set[index]
             hypotheses = runner.generate(sample["speech"])
             prediction = hypotheses[0] if hypotheses else ""
@@ -300,7 +307,7 @@ def evaluate(
             }
             rows.append(row)
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-            print(f"[{name} eval {index + 1}/{len(eval_set)}] WER={metrics['wer']:.3f}")
+            progress.set_postfix(wer=f"{metrics['wer']:.3f}")
     summary = aggregate_metrics(rows)
     del runner
     torch.cuda.empty_cache()

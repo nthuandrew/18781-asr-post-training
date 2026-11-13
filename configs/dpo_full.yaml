@@ -1,0 +1,35 @@
+model:
+  tag: espnet/owsm_v4_base_102M
+  lang_sym: <eng>
+  task_sym: <asr>
+
+dataset:
+  path: google/fleurs
+  subset: en_us
+  train_split: train
+  eval_split: test
+  audio_column: audio
+  text_column: transcription
+  id_column: id
+  sampling_rate: 16000
+  train_examples: null
+  eval_examples: null
+  selection: shuffle
+
+training:
+  steps: 2602
+  learning_rate: 5.0e-6
+  num_hypotheses: 4
+  beta: 0.1
+  max_grad_norm: 1.0
+  log_candidates: false
+
+reward:
+  format_weight: 1.0
+  wer_weight: 1.5
+  wer_tolerance: 0.0
+
+runtime:
+  seed: 13
+  device: cuda
+  output_dir: outputs/dpo_full

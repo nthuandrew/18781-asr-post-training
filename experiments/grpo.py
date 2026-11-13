@@ -10,6 +10,7 @@ from typing import Any, Sequence
 
 import numpy as np
 import torch
+from tqdm.auto import tqdm
 
 from evaluation.metrics import compute_format_reward
 from experiments.asr_common import (
@@ -34,6 +35,7 @@ class GRPOTrainingConfig:
     clip_epsilon: float = 0.2
     kl_beta: float = 0.02
     max_grad_norm: float = 1.0
+    log_candidates: bool = False
 
 
 @dataclass
@@ -82,7 +84,13 @@ def train(config: GRPOConfig, train_set: ASRDataset) -> Path:
     )
     history: list[dict[str, float]] = []
 
-    for step in range(training.steps):
+    progress = tqdm(
+        range(training.steps),
+        desc="GRPO train",
+        unit="step",
+        dynamic_ncols=True,
+    )
+    for step in progress:
         sample = train_set[step % len(train_set)]
         hypotheses = runner.generate(sample["speech"])
         rewards = [
@@ -95,11 +103,12 @@ def train(config: GRPOConfig, train_set: ASRDataset) -> Path:
             )
             for hypothesis in hypotheses
         ]
-        for rank, (hypothesis, reward) in enumerate(zip(hypotheses, rewards), start=1):
-            print(f"  candidate {rank}: reward={reward:.4f} text={hypothesis!r}")
+        if training.log_candidates:
+            for rank, (hypothesis, reward) in enumerate(zip(hypotheses, rewards), start=1):
+                tqdm.write(f"  candidate {rank}: reward={reward:.4f} text={hypothesis!r}")
         advantages = torch.tensor(group_advantages(rewards), device=runner.device)
         if len(hypotheses) < 2 or torch.count_nonzero(advantages).item() == 0:
-            print(f"[GRPO {step + 1}/{training.steps}] skipped: no reward variance")
+            progress.set_postfix(status="skipped: no reward variance")
             continue
 
         optimizer.zero_grad(set_to_none=True)
@@ -134,10 +143,11 @@ def train(config: GRPOConfig, train_set: ASRDataset) -> Path:
             "grad_norm": float(grad_norm.detach().cpu()),
         }
         history.append(record)
-        print(
-            f"[GRPO {step + 1}/{training.steps}] loss={record['loss']:.4f} "
-            f"reward={record['mean_reward']:.4f} kl={record['kl']:.4f} "
-            f"grad_norm={record['grad_norm']:.4f}"
+        progress.set_postfix(
+            loss=f"{record['loss']:.4f}",
+            reward=f"{record['mean_reward']:.4f}",
+            kl=f"{record['kl']:.4f}",
+            grad_norm=f"{record['grad_norm']:.4f}",
         )
 
     path = Path(common.runtime.output_dir) / "grpo.pt"

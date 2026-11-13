@@ -23,6 +23,7 @@ training:
   clip_epsilon: 0.2
   kl_beta: 0.02
   max_grad_norm: 1.0
+  log_candidates: false
 
 reward:
   format_weight: 1.0

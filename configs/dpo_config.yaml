@@ -22,6 +22,7 @@ training:
   num_hypotheses: 4
   beta: 0.1
   max_grad_norm: 1.0
+  log_candidates: false
 
 reward:
   format_weight: 1.0

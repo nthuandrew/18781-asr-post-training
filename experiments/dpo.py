@@ -11,6 +11,7 @@ from typing import Any, Sequence
 import numpy as np
 import torch
 import torch.nn.functional as F
+from tqdm.auto import tqdm
 
 from evaluation.metrics import compute_format_reward
 from experiments.asr_common import (
@@ -34,6 +35,7 @@ class DPOTrainingConfig:
     num_hypotheses: int = 4
     beta: float = 0.1
     max_grad_norm: float = 1.0
+    log_candidates: bool = False
 
 
 @dataclass
@@ -97,7 +99,13 @@ def train(config: DPOConfig, train_set: ASRDataset) -> Path:
     )
     history: list[dict[str, float | str]] = []
 
-    for step in range(training.steps):
+    progress = tqdm(
+        range(training.steps),
+        desc="DPO train",
+        unit="step",
+        dynamic_ncols=True,
+    )
+    for step in progress:
         sample = train_set[step % len(train_set)]
         hypotheses = runner.generate(sample["speech"])
         rewards = [
@@ -110,11 +118,12 @@ def train(config: DPOConfig, train_set: ASRDataset) -> Path:
             )
             for hypothesis in hypotheses
         ]
-        for rank, (hypothesis, reward) in enumerate(zip(hypotheses, rewards), start=1):
-            print(f"  candidate {rank}: reward={reward:.4f} text={hypothesis!r}")
+        if training.log_candidates:
+            for rank, (hypothesis, reward) in enumerate(zip(hypotheses, rewards), start=1):
+                tqdm.write(f"  candidate {rank}: reward={reward:.4f} text={hypothesis!r}")
         pair = select_preference_pair(hypotheses, rewards)
         if pair is None:
-            print(f"[DPO {step + 1}/{training.steps}] skipped: no strict preference pair")
+            progress.set_postfix(status="skipped: no preference")
             continue
         chosen, rejected = pair
 
@@ -147,10 +156,10 @@ def train(config: DPOConfig, train_set: ASRDataset) -> Path:
             "rejected": rejected,
         }
         history.append(record)
-        print(
-            f"[DPO {step + 1}/{training.steps}] loss={record['loss']:.4f} "
-            f"reward_margin={record['chosen_reward'] - record['rejected_reward']:.4f} "
-            f"grad_norm={record['grad_norm']:.4f}"
+        progress.set_postfix(
+            loss=f"{record['loss']:.4f}",
+            reward_margin=f"{record['chosen_reward'] - record['rejected_reward']:.4f}",
+            grad_norm=f"{record['grad_norm']:.4f}",
         )
 
     path = Path(common.runtime.output_dir) / "dpo.pt"

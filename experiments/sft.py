@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 import torch
+from tqdm.auto import tqdm
 
 from experiments.asr_common import (
     ASRDataset,
@@ -52,7 +53,13 @@ def train(config: SFTConfig, train_set: ASRDataset) -> Path:
         runner.model.parameters(), lr=config.training.learning_rate
     )
     losses: list[float] = []
-    for step in range(config.training.steps):
+    progress = tqdm(
+        range(config.training.steps),
+        desc="SFT train",
+        unit="step",
+        dynamic_ncols=True,
+    )
+    for step in progress:
         sample = train_set[step % len(train_set)]
         optimizer.zero_grad(set_to_none=True)
         loss = runner.sft_loss(sample)
@@ -62,9 +69,8 @@ def train(config: SFTConfig, train_set: ASRDataset) -> Path:
         )
         optimizer.step()
         losses.append(float(loss.detach().cpu()))
-        print(
-            f"[SFT {step + 1}/{config.training.steps}] loss={losses[-1]:.4f} "
-            f"grad_norm={float(grad_norm):.4f}"
+        progress.set_postfix(
+            loss=f"{losses[-1]:.4f}", grad_norm=f"{float(grad_norm):.4f}"
         )
 
     path = Path(config.common.runtime.output_dir) / "sft.pt"
