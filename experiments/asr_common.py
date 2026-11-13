@@ -70,6 +70,29 @@ class CommonConfig:
         return asdict(self)
 
 
+class JsonlLogger:
+    """Write crash-resilient, line-delimited training diagnostics."""
+
+    def __init__(self, output_dir: str | Path, filename: str) -> None:
+        destination = Path(output_dir)
+        destination.mkdir(parents=True, exist_ok=True)
+        self.path = destination / filename
+        self.handle = self.path.open("w", encoding="utf-8")
+
+    def write(self, record: dict[str, Any]) -> None:
+        self.handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        self.handle.flush()
+
+    def close(self) -> None:
+        self.handle.close()
+
+    def __enter__(self) -> JsonlLogger:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+
 def load_yaml(path: str | Path) -> dict[str, Any]:
     with Path(path).open("r", encoding="utf-8") as handle:
         values = yaml.safe_load(handle) or {}
@@ -100,6 +123,23 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def resolve_training_steps(
+    *, steps: int | None, epochs: int | None, dataset_size: int
+) -> int:
+    """Resolve either an explicit step budget or a whole-dataset epoch budget."""
+    if steps is not None and epochs is not None:
+        raise ValueError("Set only one of training.steps or training.epochs")
+    if steps is not None:
+        if steps <= 0:
+            raise ValueError("training.steps must be positive")
+        return int(steps)
+    if epochs is not None:
+        if epochs <= 0:
+            raise ValueError("training.epochs must be positive")
+        return int(epochs) * int(dataset_size)
+    raise ValueError("Set training.steps or training.epochs")
 
 
 def aggregate_metrics(rows: Sequence[dict[str, Any]]) -> dict[str, float]:

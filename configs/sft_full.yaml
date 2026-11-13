@@ -17,11 +17,13 @@ dataset:
   selection: shuffle
 
 training:
-  steps: 2602
+  steps: null
+  epochs: 5
   learning_rate: 1.0e-5
   max_grad_norm: 1.0
+  batch_size: 4
 
 runtime:
   seed: 13
   device: cuda
-  output_dir: outputs/sft_full
+  output_dir: outputs/sft_full_v3

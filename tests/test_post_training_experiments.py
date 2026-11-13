@@ -1,7 +1,11 @@
 import torch
 
 from evaluation.metrics import compute_format_reward, format_compliance
-from experiments.asr_common import aggregate_metrics, parse_common_config
+from experiments.asr_common import (
+    aggregate_metrics,
+    parse_common_config,
+    resolve_training_steps,
+)
 from experiments.dpo import dpo_loss, select_preference_pair
 from experiments.grpo import group_advantages
 
@@ -33,6 +37,10 @@ def test_group_advantages_handle_identical_rewards() -> None:
     assert group_advantages([0.5, 0.5]) == [0.0, 0.0]
 
 
+def test_epochs_resolve_to_complete_dataset_passes() -> None:
+    assert resolve_training_steps(steps=None, epochs=3, dataset_size=2602) == 7806
+
+
 def test_dpo_loss_decreases_when_policy_preference_margin_improves() -> None:
     reference = torch.tensor([-2.0, -2.0])
     baseline_loss, _ = dpo_loss(torch.tensor([-2.0, -2.0]), reference, beta=0.1)
@@ -49,8 +57,41 @@ def test_select_preference_pair_rejects_reward_tie() -> None:
     assert select_preference_pair(["first", "second"], [0.5, 0.5]) is None
 
 
+def test_select_preference_pair_applies_margin_and_wer_gates() -> None:
+    hypotheses = ["best", "worst"]
+    assert (
+        select_preference_pair(
+            hypotheses,
+            [0.6, 0.55],
+            wers=[0.1, 0.2],
+            min_reward_margin=0.1,
+            max_chosen_wer=0.15,
+        )
+        is None
+    )
+    assert (
+        select_preference_pair(
+            hypotheses,
+            [0.8, 0.5],
+            wers=[0.2, 0.3],
+            min_reward_margin=0.1,
+            max_chosen_wer=0.15,
+        )
+        is None
+    )
+
+
 def test_format_compliance_observes_original_punctuation() -> None:
     assert format_compliance("Hello world 2.") > format_compliance("hello world two")
+
+
+def test_format_compliance_ignores_initial_capitalization() -> None:
+    assert format_compliance("Hello world.") == format_compliance("hello world.")
+
+
+def test_format_compliance_counts_comma_as_punctuation() -> None:
+    assert format_compliance("hello, world") > format_compliance("hello world")
+    assert format_compliance("hello, world.") == format_compliance("hello world.")
 
 
 def test_wer_tolerance_is_a_free_window() -> None:

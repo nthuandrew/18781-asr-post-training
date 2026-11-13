@@ -13,16 +13,18 @@ import torch
 import torch.nn.functional as F
 from tqdm.auto import tqdm
 
-from evaluation.metrics import compute_format_reward
+from evaluation.metrics import compute_format_reward, wer_score
 from experiments.asr_common import (
     ASRDataset,
     CommonConfig,
+    JsonlLogger,
     OWSMModel,
     RewardConfig,
     evaluate,
     load_yaml,
     parse_common_config,
     print_and_save_comparison,
+    resolve_training_steps,
     set_seed,
     write_resolved_config,
 )
@@ -30,12 +32,16 @@ from experiments.asr_common import (
 
 @dataclass
 class DPOTrainingConfig:
-    steps: int = 5
+    steps: int | None = 5
+    epochs: int | None = None
     learning_rate: float = 5.0e-6
     num_hypotheses: int = 4
     beta: float = 0.1
     max_grad_norm: float = 1.0
     log_candidates: bool = False
+    min_reward_margin: float = 0.0
+    max_chosen_wer: float | None = None
+    batch_size: int = 1
 
 
 @dataclass
@@ -75,13 +81,26 @@ def dpo_loss(
 
 
 def select_preference_pair(
-    hypotheses: Sequence[str], rewards: Sequence[float]
+    hypotheses: Sequence[str],
+    rewards: Sequence[float],
+    *,
+    wers: Sequence[float] | None = None,
+    min_reward_margin: float = 0.0,
+    max_chosen_wer: float | None = None,
 ) -> tuple[str, str] | None:
     if len(hypotheses) != len(rewards) or len(hypotheses) < 2:
         return None
     chosen_index = int(np.argmax(rewards))
     rejected_index = int(np.argmin(rewards))
-    if chosen_index == rejected_index or rewards[chosen_index] <= rewards[rejected_index]:
+    reward_margin = rewards[chosen_index] - rewards[rejected_index]
+    if chosen_index == rejected_index or reward_margin < min_reward_margin:
+        return None
+    if max_chosen_wer is not None:
+        if wers is None or len(wers) != len(hypotheses):
+            raise ValueError("Candidate WERs are required when max_chosen_wer is set")
+        if wers[chosen_index] > max_chosen_wer:
+            return None
+    if reward_margin <= 0.0:
         return None
     return hypotheses[chosen_index], hypotheses[rejected_index]
 
@@ -97,70 +116,162 @@ def train(config: DPOConfig, train_set: ASRDataset) -> Path:
     optimizer = torch.optim.Adam(
         runner.model.parameters(), lr=training.learning_rate
     )
-    history: list[dict[str, float | str]] = []
+    history: list[dict[str, Any]] = []
+    total_steps = resolve_training_steps(
+        steps=training.steps,
+        epochs=training.epochs,
+        dataset_size=len(train_set),
+    )
 
+    if training.batch_size <= 0:
+        raise ValueError("training.batch_size must be positive")
     progress = tqdm(
-        range(training.steps),
+        range(total_steps),
         desc="DPO train",
         unit="step",
         dynamic_ncols=True,
     )
-    for step in progress:
-        sample = train_set[step % len(train_set)]
-        hypotheses = runner.generate(sample["speech"])
-        rewards = [
-            compute_format_reward(
-                sample["reference"],
-                hypothesis,
-                format_weight=config.reward.format_weight,
-                wer_weight=config.reward.wer_weight,
-                wer_tolerance=config.reward.wer_tolerance,
-            )
-            for hypothesis in hypotheses
-        ]
-        if training.log_candidates:
-            for rank, (hypothesis, reward) in enumerate(zip(hypotheses, rewards), start=1):
-                tqdm.write(f"  candidate {rank}: reward={reward:.4f} text={hypothesis!r}")
-        pair = select_preference_pair(hypotheses, rewards)
-        if pair is None:
-            progress.set_postfix(status="skipped: no preference")
-            continue
-        chosen, rejected = pair
+    pending: list[dict[str, Any]] = []
+    optimizer_step = 0
+    skipped = 0
 
+    def update_batch() -> None:
+        nonlocal optimizer_step
+        if not pending:
+            return
         optimizer.zero_grad(set_to_none=True)
-        runner.model.eval()
-        policy_logps = runner.sequence_log_probs(
-            sample, [chosen, rejected], length_normalize=False
-        )
-        with torch.no_grad():
-            policy_model = runner.model
-            runner.model = reference
-            reference_logps = runner.sequence_log_probs(
-                sample, [chosen, rejected], length_normalize=False
-            )
-            runner.model = policy_model
-
-        loss, logits = dpo_loss(policy_logps, reference_logps, training.beta)
-        loss.backward()
+        batch_loss = torch.stack([item["loss"] for item in pending]).mean()
+        batch_loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(
             runner.model.parameters(), training.max_grad_norm
         )
         optimizer.step()
-        record: dict[str, float | str] = {
-            "loss": float(loss.detach().cpu()),
-            "preference_logit": float(logits.detach().cpu()),
-            "chosen_reward": float(max(rewards)),
-            "rejected_reward": float(min(rewards)),
+        logits = [float(item["logit"].detach().cpu()) for item in pending]
+        losses = [float(item["loss"].detach().cpu()) for item in pending]
+        record: dict[str, Any] = {
+            "optimizer_step": optimizer_step,
+            "epoch": pending[0]["epoch"],
+            "batch_size": len(pending),
+            "loss": float(batch_loss.detach().cpu()),
+            "sample_losses": losses,
+            "preference_logit": float(np.mean(logits)),
+            "preference_logits": logits,
+            "reward_margin": float(np.mean([item["reward_margin"] for item in pending])),
+            "chosen_reward": float(np.mean([item["chosen_reward"] for item in pending])),
+            "rejected_reward": float(np.mean([item["rejected_reward"] for item in pending])),
+            "chosen_wer": float(np.mean([item["chosen_wer"] for item in pending])),
+            "rejected_wer": float(np.mean([item["rejected_wer"] for item in pending])),
+            "policy_margin": float(np.mean([item["policy_margin"] for item in pending])),
+            "reference_margin": float(np.mean([item["reference_margin"] for item in pending])),
             "grad_norm": float(grad_norm.detach().cpu()),
-            "chosen": chosen,
-            "rejected": rejected,
+            "learning_rate": float(optimizer.param_groups[0]["lr"]),
+            "sample_ids": [item["sample_id"] for item in pending],
+            "skipped_samples_so_far": skipped,
         }
         history.append(record)
+        training_logger.write(record)
+        optimizer_step += 1
+        pending.clear()
         progress.set_postfix(
             loss=f"{record['loss']:.4f}",
-            reward_margin=f"{record['chosen_reward'] - record['rejected_reward']:.4f}",
+            reward_margin=f"{record['reward_margin']:.4f}",
             grad_norm=f"{record['grad_norm']:.4f}",
         )
+
+    with (
+        JsonlLogger(common.runtime.output_dir, "training_log.jsonl") as training_logger,
+        JsonlLogger(common.runtime.output_dir, "training_samples.jsonl") as sample_logger,
+    ):
+        for step in progress:
+            sample = train_set[step % len(train_set)]
+            hypotheses = runner.generate(sample["speech"])
+            rewards = [
+                compute_format_reward(
+                    sample["reference"],
+                    hypothesis,
+                    format_weight=config.reward.format_weight,
+                    wer_weight=config.reward.wer_weight,
+                    wer_tolerance=config.reward.wer_tolerance,
+                )
+                for hypothesis in hypotheses
+            ]
+            wers = [wer_score(sample["reference"], hypothesis) for hypothesis in hypotheses]
+            if training.log_candidates:
+                for rank, (hypothesis, reward) in enumerate(zip(hypotheses, rewards), start=1):
+                    tqdm.write(f"  candidate {rank}: reward={reward:.4f} text={hypothesis!r}")
+            pair = select_preference_pair(
+                hypotheses,
+                rewards,
+                wers=wers,
+                min_reward_margin=training.min_reward_margin,
+                max_chosen_wer=training.max_chosen_wer,
+            )
+            sample_record: dict[str, Any] = {
+                "sample_step": step,
+                "epoch": step // len(train_set) + 1,
+                "sample_id": sample["id"],
+                "reference": sample["reference"],
+                "hypotheses": hypotheses,
+                "rewards": [float(value) for value in rewards],
+                "wers": [float(value) for value in wers],
+                "accepted": pair is not None,
+            }
+            if pair is None:
+                skipped += 1
+                sample_record["skip_reason"] = "no_pair_after_reward_margin_or_wer_gates"
+                sample_logger.write(sample_record)
+                progress.set_postfix(status="skipped: no preference")
+            else:
+                chosen, rejected = pair
+                chosen_index = hypotheses.index(chosen)
+                rejected_index = hypotheses.index(rejected)
+                runner.model.eval()
+                policy_logps = runner.sequence_log_probs(
+                    sample, [chosen, rejected], length_normalize=False
+                )
+                with torch.no_grad():
+                    policy_model = runner.model
+                    runner.model = reference
+                    reference_logps = runner.sequence_log_probs(
+                        sample, [chosen, rejected], length_normalize=False
+                    )
+                    runner.model = policy_model
+                loss, logit = dpo_loss(policy_logps, reference_logps, training.beta)
+                sample_record.update(
+                    {
+                        "chosen_index": chosen_index,
+                        "rejected_index": rejected_index,
+                        "chosen": chosen,
+                        "rejected": rejected,
+                        "chosen_reward": float(rewards[chosen_index]),
+                        "rejected_reward": float(rewards[rejected_index]),
+                        "chosen_wer": float(wers[chosen_index]),
+                        "rejected_wer": float(wers[rejected_index]),
+                        "policy_logps": [float(value) for value in policy_logps.detach().cpu()],
+                        "reference_logps": [float(value) for value in reference_logps.cpu()],
+                        "loss": float(loss.detach().cpu()),
+                        "preference_logit": float(logit.detach().cpu()),
+                    }
+                )
+                sample_logger.write(sample_record)
+                pending.append(
+                    {
+                        "loss": loss,
+                        "logit": logit,
+                        "epoch": sample_record["epoch"],
+                        "sample_id": sample["id"],
+                        "reward_margin": rewards[chosen_index] - rewards[rejected_index],
+                        "chosen_reward": rewards[chosen_index],
+                        "rejected_reward": rewards[rejected_index],
+                        "chosen_wer": wers[chosen_index],
+                        "rejected_wer": wers[rejected_index],
+                        "policy_margin": float((policy_logps[0] - policy_logps[1]).detach().cpu()),
+                        "reference_margin": float((reference_logps[0] - reference_logps[1]).cpu()),
+                    }
+                )
+            if len(pending) >= training.batch_size or (step + 1) % len(train_set) == 0:
+                update_batch()
+        update_batch()
 
     path = Path(common.runtime.output_dir) / "dpo.pt"
     path.parent.mkdir(parents=True, exist_ok=True)

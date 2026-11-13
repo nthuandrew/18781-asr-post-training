@@ -23,7 +23,9 @@ training:
   clip_epsilon: 0.2
   kl_beta: 0.02
   max_grad_norm: 1.0
+  batch_size: 1
   log_candidates: false
+  optimization_epochs: 1
 
 reward:
   format_weight: 1.0

@@ -17,13 +17,16 @@ dataset:
   selection: shuffle
 
 training:
-  steps: 2602
-  learning_rate: 1.0e-6
-  num_hypotheses: 4
+  steps: null
+  epochs: 5
+  learning_rate: 5.0e-6
+  num_hypotheses: 16
   clip_epsilon: 0.2
-  kl_beta: 0.02
-  max_grad_norm: 1.0
+  kl_beta: 0.01
+  max_grad_norm: 2.0
+  batch_size: 2
   log_candidates: false
+  optimization_epochs: 4
 
 reward:
   format_weight: 1.0
@@ -33,4 +36,4 @@ reward:
 runtime:
   seed: 13
   device: cuda
-  output_dir: outputs/grpo_full
+  output_dir: outputs/grpo_full_v3

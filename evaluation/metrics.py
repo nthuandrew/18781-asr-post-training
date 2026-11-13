@@ -62,21 +62,25 @@ def format_compliance(text: str) -> float:
 
     The score is intentionally simple and auditable.  Lexical correctness is
     measured separately with WER, so this function only checks disfluencies,
-    casing, punctuation, and written-number usage.
+    punctuation, and written-number usage. Commas and terminal punctuation are
+    one shared component. Initial capitalization is excluded because it is not
+    a meaningful alignment target for this experiment.
     """
     normalized = _normalize_text(text)
     if not normalized:
         return 0.0
 
     has_disfluency = bool(re.search(r"\b(?:um|uh|erm|mm|you\s+know)\b", normalized))
-    score = 0.25 if not has_disfluency else 0.0
+    component_weight = 1.0 / 3.0
+    score = component_weight if not has_disfluency else 0.0
     stripped = (text or "").strip()
-    if stripped[:1].isupper():
-        score += 0.25
-    if re.search(r"[.!?][\"')\]]?$", stripped):
-        score += 0.25
+    has_punctuation = "," in stripped or bool(
+        re.search(r"[.!?][\"')\]]?$", stripped)
+    )
+    if has_punctuation:
+        score += component_weight
     if re.search(r"\b\d+(?:[.,]\d+)?\b", stripped):
-        score += 0.25
+        score += component_weight
     return min(score, 1.0)
 
 
